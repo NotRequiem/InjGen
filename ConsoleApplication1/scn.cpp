@@ -69,6 +69,68 @@ inline static std::vector<std::string> __vectorcall avx512_mem_scn(unsigned char
     return __mm_dump;
 }
 
+inline static std::vector<std::string> __vectorcall avx_mem_scn(unsigned char* buffer, size_t bytesRead) {
+    std::vector<std::string> capturedStrings;
+    constexpr size_t s256 = 32;
+    const size_t numBlocks256 = bytesRead / s256;
+
+    for (size_t i = 0; i < numBlocks256; ++i) {
+        __m256i data256 = _mm256_loadu_si256((__m256i*)(buffer + i * s256));
+        __m256i gt31 = _mm256_cmpgt_epi8(data256, _mm256_set1_epi8(31));
+        __m256i lt127 = _mm256_cmpgt_epi8(_mm256_set1_epi8(127), data256);
+        __m256i isPrintable256 = _mm256_and_si256(gt31, lt127);
+
+        int mask = _mm256_movemask_epi8(isPrintable256);
+
+        size_t j = 0;
+        while (j < s256) {
+            size_t k = j;
+            while (k < s256 && (mask & (1 << k))) {
+                ++k;
+            }
+
+            if (k - j >= MIN_STRING_LENGTH) {
+                capturedStrings.emplace_back((char*)(buffer + i * s256 + j), k - j);
+            }
+
+            j = k + 1;
+        }
+    }
+
+    return capturedStrings;
+}
+
+inline static std::vector<std::string> __vectorcall sse_mem_scn(unsigned char* buffer, size_t bytesRead) {
+    std::vector<std::string> capturedStrings;
+    constexpr size_t s128 = 16;
+    const size_t numBlocks128 = bytesRead / s128;
+
+    for (size_t i = 0; i < numBlocks128; ++i) {
+        __m128i data128 = _mm_loadu_si128((__m128i*)(buffer + i * s128));
+        __m128i gt31 = _mm_cmpgt_epi8(data128, _mm_set1_epi8(31));
+        __m128i lt127 = _mm_cmpgt_epi8(_mm_set1_epi8(127), data128);
+        __m128i isPrintable128 = _mm_and_si128(gt31, lt127);
+
+        int mask = _mm_movemask_epi8(isPrintable128);
+
+        size_t j = 0;
+        while (j < s128) {
+            size_t k = j;
+            while (k < s128 && (mask & (1 << k))) {
+                ++k;
+            }
+
+            if (k - j >= MIN_STRING_LENGTH) {
+                capturedStrings.emplace_back((char*)(buffer + i * s128 + j), k - j);
+            }
+
+            j = k + 1;
+        }
+    }
+
+    return capturedStrings;
+}
+
 inline static std::vector<std::string> __fastcall generic_memory_scan(unsigned char* buffer, size_t bytesRead) {
     std::vector<std::string> __mm_dump;
     std::string currentString;
@@ -237,7 +299,7 @@ void __fastcall start_memory_scan(const DWORD pid) {
             std::cout << "[!] DoomsDay Client detected.\n";
         }
         else {
-            std::cout << "[-] DoomsDay Client was detected outside Lunar Client. I only tested Vanilla, Lunar and Feather so be careful! :)" << std::endl;
+            std::cout << "[-] DoomsDay Client was detected outside Lunar Client. I only tested Vanilla and Lunar so be careful." << std::endl;
         }
     }
     else {
