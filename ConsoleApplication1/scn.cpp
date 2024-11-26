@@ -2,7 +2,10 @@
 #include "proc.hh"
 #include "krnljmper.h"
 
-static inline inst_set __intr() {
+using __simd__mem_scan_ptr = std::vector<std::string>(__vectorcall*)(unsigned char*, size_t);
+using __mem_scan_ptr = std::vector<std::string>(__fastcall*)(unsigned char*, size_t);
+
+__forceinline inst_set __intr() {
     int info[4];
     __cpuidex(info, 0, 0);
     int nIds = info[0];
@@ -31,101 +34,169 @@ static inline inst_set __intr() {
     return instructionSet;
 }
 
+inline static int countTrailingZeros(uint32_t mask) {
+#if defined(_MSC_VER)
+    unsigned long index;
+    if (_BitScanForward(&index, mask)) {
+        return static_cast<int>(index);
+    }
+#else
+    if (mask != 0) {
+        return __builtin_ctz(mask);
+    }
+#endif
+    return 32;
+}
+
 inline static std::vector<std::string> __vectorcall avx512_mem_scn(unsigned char* buffer, size_t bytesRead) {
-    std::vector<std::string> __mm_dump;
     constexpr size_t s512 = 64;
     const size_t numBlocks512 = bytesRead / s512;
+    std::vector<std::string> capturedStrings;
     std::string partialString;
 
     for (size_t i = 0; i < numBlocks512; ++i) {
-        __m512i data512 = _mm512_loadu_si512((__m512i*)(buffer + i * s512));
+        __m512i data512 = _mm512_loadu_si512(reinterpret_cast<__m512i*>(buffer + i * s512));
+
         __mmask64 isPrintable512 = _mm512_cmpgt_epi8_mask(data512, _mm512_set1_epi8(31)) &
             _mm512_cmplt_epi8_mask(data512, _mm512_set1_epi8(127));
 
-        size_t j = 0;
-        while (j < s512) {
-            if (isPrintable512 & (1ULL << j)) {
-                size_t k = j;
-                while (k < s512 && (isPrintable512 & (1ULL << k))) {
-                    ++k;
-                }
+        uint64_t mask = isPrintable512;
+        size_t start = 0;
 
-                if (k - j + partialString.size() >= MIN_STRING_LENGTH) {
-                    std::string foundString = partialString + std::string((char*)(buffer + i * s512 + j), k - j);
-                    __mm_dump.push_back(foundString);
+        while (mask != 0) {
+            size_t tz = _tzcnt_u64(mask);
+            start += tz;
+            mask >>= tz;
+
+            size_t len = 0;
+            while (mask & 1) {
+                ++len;
+                mask >>= 1;
+            }
+            start += len;
+
+            if (len + partialString.size() >= MIN_STRING_LENGTH) {
+                if (!partialString.empty()) {
+                    partialString.append(reinterpret_cast<char*>(buffer + i * s512 + start - len), len);
+                    capturedStrings.emplace_back(std::move(partialString));
                     partialString.clear();
                 }
                 else {
-                    partialString += std::string((char*)(buffer + i * s512 + j), k - j);
+                    capturedStrings.emplace_back(reinterpret_cast<char*>(buffer + i * s512 + start - len), len);
                 }
-                j = k;
             }
             else {
-                ++j;
+                partialString.append(reinterpret_cast<char*>(buffer + i * s512 + start - len), len);
             }
         }
     }
 
-    return __mm_dump;
+    if (partialString.size() >= MIN_STRING_LENGTH) {
+        capturedStrings.emplace_back(std::move(partialString));
+    }
+
+    return capturedStrings;
 }
 
 inline static std::vector<std::string> __vectorcall avx_mem_scn(unsigned char* buffer, size_t bytesRead) {
-    std::vector<std::string> capturedStrings;
     constexpr size_t s256 = 32;
     const size_t numBlocks256 = bytesRead / s256;
+    std::vector<std::string> capturedStrings;
+    std::string partialString;
 
     for (size_t i = 0; i < numBlocks256; ++i) {
-        __m256i data256 = _mm256_loadu_si256((__m256i*)(buffer + i * s256));
-        __m256i gt31 = _mm256_cmpgt_epi8(data256, _mm256_set1_epi8(31));
-        __m256i lt127 = _mm256_cmpgt_epi8(_mm256_set1_epi8(127), data256);
-        __m256i isPrintable256 = _mm256_and_si256(gt31, lt127);
+        __m256i data256 = _mm256_loadu_si256(reinterpret_cast<__m256i*>(buffer + i * s256));
 
-        int mask = _mm256_movemask_epi8(isPrintable256);
+        __m256i isPrintable256 = _mm256_and_si256(
+            _mm256_cmpgt_epi8(data256, _mm256_set1_epi8(31)),
+            _mm256_cmpgt_epi8(_mm256_set1_epi8(127), data256)
+        );
 
-        size_t j = 0;
-        while (j < s256) {
-            size_t k = j;
-            while (k < s256 && (mask & (1 << k))) {
-                ++k;
+        uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(isPrintable256));
+
+        size_t start = 0;
+        while (mask != 0) {
+            int tz = countTrailingZeros(mask);
+            start += tz;
+            mask >>= tz;
+
+            size_t len = 0;
+            while (mask & 1) {
+                ++len;
+                mask >>= 1;
             }
+            start += len;
 
-            if (k - j >= MIN_STRING_LENGTH) {
-                capturedStrings.emplace_back((char*)(buffer + i * s256 + j), k - j);
+            if (len + partialString.size() >= MIN_STRING_LENGTH) {
+                if (!partialString.empty()) {
+                    partialString.append(reinterpret_cast<char*>(buffer + i * s256 + start - len), len);
+                    capturedStrings.emplace_back(std::move(partialString));
+                    partialString.clear();
+                }
+                else {
+                    capturedStrings.emplace_back(reinterpret_cast<char*>(buffer + i * s256 + start - len), len);
+                }
             }
-
-            j = k + 1;
+            else {
+                partialString.append(reinterpret_cast<char*>(buffer + i * s256 + start - len), len);
+            }
         }
+    }
+
+    if (partialString.size() >= MIN_STRING_LENGTH) {
+        capturedStrings.emplace_back(std::move(partialString));
     }
 
     return capturedStrings;
 }
 
 inline static std::vector<std::string> __vectorcall sse_mem_scn(unsigned char* buffer, size_t bytesRead) {
-    std::vector<std::string> capturedStrings;
     constexpr size_t s128 = 16;
     const size_t numBlocks128 = bytesRead / s128;
+    std::vector<std::string> capturedStrings;
+    std::string partialString;
 
     for (size_t i = 0; i < numBlocks128; ++i) {
-        __m128i data128 = _mm_loadu_si128((__m128i*)(buffer + i * s128));
-        __m128i gt31 = _mm_cmpgt_epi8(data128, _mm_set1_epi8(31));
-        __m128i lt127 = _mm_cmpgt_epi8(_mm_set1_epi8(127), data128);
-        __m128i isPrintable128 = _mm_and_si128(gt31, lt127);
+        __m128i data128 = _mm_loadu_si128(reinterpret_cast<__m128i*>(buffer + i * s128));
 
-        int mask = _mm_movemask_epi8(isPrintable128);
+        __m128i isPrintable128 = _mm_and_si128(
+            _mm_cmpgt_epi8(data128, _mm_set1_epi8(31)),
+            _mm_cmplt_epi8(data128, _mm_set1_epi8(127))
+        );
 
-        size_t j = 0;
-        while (j < s128) {
-            size_t k = j;
-            while (k < s128 && (mask & (1 << k))) {
-                ++k;
+        uint32_t mask = static_cast<uint32_t>(_mm_movemask_epi8(isPrintable128));
+
+        size_t start = 0;
+        while (mask != 0) {
+            int tz = countTrailingZeros(mask);
+            start += tz;
+            mask >>= tz;
+
+            size_t len = 0;
+            while (mask & 1) {
+                ++len;
+                mask >>= 1;
             }
+            start += len;
 
-            if (k - j >= MIN_STRING_LENGTH) {
-                capturedStrings.emplace_back((char*)(buffer + i * s128 + j), k - j);
+            if (len + partialString.size() >= MIN_STRING_LENGTH) {
+                if (!partialString.empty()) {
+                    partialString.append(reinterpret_cast<char*>(buffer + i * s128 + start - len), len);
+                    capturedStrings.emplace_back(std::move(partialString));
+                    partialString.clear();
+                }
+                else {
+                    capturedStrings.emplace_back(reinterpret_cast<char*>(buffer + i * s128 + start - len), len);
+                }
             }
-
-            j = k + 1;
+            else {
+                partialString.append(reinterpret_cast<char*>(buffer + i * s128 + start - len), len);
+            }
         }
+    }
+
+    if (partialString.size() >= MIN_STRING_LENGTH) {
+        capturedStrings.emplace_back(std::move(partialString));
     }
 
     return capturedStrings;
@@ -159,17 +230,32 @@ inline static std::vector<std::string> __fastcall generic_memory_scan(unsigned c
     return __mm_dump;
 }
 
-inline static std::vector<std::string> __fastcall __trigger_pattern(unsigned char* buffer, size_t bytesRead, inst_set instructionSet) {
-    switch (instructionSet) {
-    case INSTRUCTION_SET_AVX512:
-        return avx512_mem_scn(buffer, bytesRead);
-    default:
-        return generic_memory_scan(buffer, bytesRead);
-    }
+inline static std::vector<std::string> __fastcall __trigger_pattern(
+    unsigned char* buffer, size_t bytesRead,
+    std::vector<std::string>(*memory_scan)(unsigned char*, size_t)) {
+    return memory_scan(buffer, bytesRead);
 }
 
 static __forceinline bool __fastcall __vld_pattern(const HANDLE hProcess) {
     inst_set cpu_instruction = __intr();
+    __mem_scan_ptr memory_scan = nullptr;
+    __simd__mem_scan_ptr simd_scan = nullptr;
+
+    switch (cpu_instruction) {
+    case INSTRUCTION_SET_AVX512:
+        simd_scan = avx512_mem_scn;
+        break;
+    case INSTRUCTION_SET_AVX:
+        simd_scan = avx_mem_scn;
+        break;
+    case INSTRUCTION_SET_SSE:
+        simd_scan = sse_mem_scn;
+        break;
+    default:
+        memory_scan = generic_memory_scan;
+        break;
+    }
+
     const HANDLE hCurrentProcess = GetCurrentProcess();
     MEMORY_BASIC_INFORMATION mbi = { 0 };
     unsigned char* address = nullptr;
@@ -180,9 +266,7 @@ static __forceinline bool __fastcall __vld_pattern(const HANDLE hProcess) {
             (!(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)))) {
 
             unsigned char* baseAddress = nullptr;
-            SIZE_T bufferSize = 0;
-
-            bufferSize = mbi.RegionSize / 2;
+            SIZE_T bufferSize = mbi.RegionSize / 2;
 
             const NTSTATUS allocStatus = KeNtAllocateVirtualMemory(
                 hCurrentProcess,
@@ -194,18 +278,24 @@ static __forceinline bool __fastcall __vld_pattern(const HANDLE hProcess) {
             );
 
             if (allocStatus != ((NTSTATUS)0x00000000L)) {
-                continue; 
+                continue;
             }
 
             unsigned char* pageStart = reinterpret_cast<unsigned char*>(mbi.BaseAddress);
             SIZE_T bytesRead = 0;
             const NTSTATUS rpm = KeNtReadVirtualMemory(hProcess, pageStart, baseAddress, bufferSize, &bytesRead);
 
-            if (rpm == 0 && bytesRead > 0) {
-                std::vector<std::string> memory_dump = __trigger_pattern(baseAddress, bytesRead, cpu_instruction);
+            if (rpm == 0) {
+                std::vector<std::string> memory_dump;
 
-                for (const auto& version : memory_dump) {
-                    if (version.find("v2.17.5-2442") != std::string::npos) {
+                if (simd_scan) 
+                    memory_dump = simd_scan(baseAddress, bytesRead);   
+                else 
+                    memory_dump = memory_scan(baseAddress, bytesRead);
+                
+                for (const auto& build : memory_dump) {
+
+                    if (build.find("com/lunarclient") != std::string::npos) {
                         KeNtFreeVirtualMemory(hCurrentProcess, reinterpret_cast<PVOID*>(&baseAddress), &bufferSize, MEM_RELEASE);
                         return true;
                     }
@@ -296,14 +386,14 @@ void __fastcall start_memory_scan(const DWORD pid) {
     if (flag) {
         std::cout << "Validating detection...\n";
         if (__vld_pattern(hProcess)) {
-            std::cout << "[!] DoomsDay Client detected.\n";
+            std::cout << "[!] Generic injection detected.\n";
         }
         else {
-            std::cout << "[-] DoomsDay Client was detected outside Lunar Client. I only tested Vanilla and Lunar so be careful." << std::endl;
+            std::cout << "[-] Injection detected in untested game client.";
         }
     }
     else {
-        std::cout << "[+] DoomsDay Client not found in game's memory.\n";
+        std::cout << "[+] No suspicious java agents were loaded in the game instance.\n";
     }
 
     KeNtClose(hProcess);
