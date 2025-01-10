@@ -12,6 +12,8 @@
 
 > Sunset Client
 
+> Karma Client
+
 **Tested false flags:**
 *This means that InjGen won't give a false positive in the following game clients:*
 
