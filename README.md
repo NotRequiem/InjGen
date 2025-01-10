@@ -13,6 +13,8 @@
 > Sunset Client
 
 **Tested false flags:**
+*This means that InjGen won't give a false positive in the following game clients:*
+
 > Lunar Client (all versions)
 
 > Feather Client (all versions)
