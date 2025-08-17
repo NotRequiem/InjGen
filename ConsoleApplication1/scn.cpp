@@ -294,7 +294,6 @@ static __forceinline bool __fastcall __vld_pattern(const HANDLE hProcess) {
                     memory_dump = memory_scan(baseAddress, bytesRead);
                 
                 for (const auto& build : memory_dump) {
-
                     if (build.find("com/lunarclient") != std::string::npos) {
                         KeNtFreeVirtualMemory(hCurrentProcess, reinterpret_cast<PVOID*>(&baseAddress), &bufferSize, MEM_RELEASE);
                         return true;
@@ -399,3 +398,4 @@ void __fastcall start_memory_scan(const DWORD pid) {
     KeNtClose(hProcess);
     system("pause");
 }
+
