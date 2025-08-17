@@ -398,4 +398,3 @@ void __fastcall start_memory_scan(const DWORD pid) {
     KeNtClose(hProcess);
     system("pause");
 }
-
